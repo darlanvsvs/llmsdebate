@@ -32,6 +32,7 @@ interface State {
   synthesisResult: string | null;
   fullTranscriptResult: string | null;
   selectedResponseIds: string[];
+  isJudging: boolean;
   
   // Actions
   setPrompt: (prompt: string) => void;
@@ -51,6 +52,7 @@ interface State {
   clearSynthesis: () => void;
   clearFullTranscript: () => void;
   reset: () => void;
+  requestJudgeSynthesis: (judgeModelId: string) => Promise<void>;
 }
 
 export const useDeliberationStore = create<State>()(
@@ -69,6 +71,7 @@ export const useDeliberationStore = create<State>()(
       synthesisResult: null,
       fullTranscriptResult: null,
       selectedResponseIds: [],
+      isJudging: false,
 
       setPrompt: (prompt) => set({ prompt }),
       setSystemPrompt: (systemPrompt) => set({ systemPrompt }),
@@ -136,6 +139,53 @@ export const useDeliberationStore = create<State>()(
           columnStatus: {}
         };
       }),
+
+      requestJudgeSynthesis: async (judgeModelId: string) => {
+        const state = get();
+        if (state.selectedResponseIds.length === 0) return;
+        
+        set({ isJudging: true });
+
+        const selectedResponses = state.responses
+          .filter(r => !r.error && state.selectedResponseIds.includes(r.id))
+          .sort((a, b) => a.round - b.round || a.modelName.localeCompare(b.modelName));
+
+        const transcript = selectedResponses
+          .map(r => `## ${r.modelName} — Rodada ${r.round}\n\n### Análise\n${r.analysis}\n\n### Conclusão Final\n${r.conclusion}`)
+          .join('\n\n---\n\n');
+
+        try {
+          const res = await fetch('/api/judge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: state.prompt,
+              transcript,
+              judgeModel: judgeModelId
+            })
+          });
+
+          if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            const msg = errData.error || `Erro na síntese O juiz falhou (HTTP ${res.status})`;
+            alert(msg);
+            set({ isJudging: false });
+            return;
+          }
+
+          const data = await res.json();
+          set({ 
+            synthesisResult: data.text,
+            status: 'completed',
+            isJudging: false,
+            columnStatus: {}
+          });
+        } catch (err) {
+          console.error(err);
+          alert("Ocorreu um erro de rede ao processar o julgamento.");
+          set({ isJudging: false });
+        }
+      },
 
       setColumnStatus: (modelId, status) => set((state) => ({
         columnStatus: { ...state.columnStatus, [modelId]: status }

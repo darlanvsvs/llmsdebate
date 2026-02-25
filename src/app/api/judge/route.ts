@@ -1,70 +1,39 @@
 export const maxDuration = 60; // Ensures the host doesn't kill the request quickly
 
 import { NextRequest, NextResponse } from 'next/server';
-import { ALL_MODELS } from '@/lib/models';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { prompt, round, model, previousResponses, systemPrompt: clientSystemPrompt } = body;
+    const { prompt, transcript, judgeModel } = body;
 
-    if (!prompt || !model) {
+    if (!prompt || !transcript || !judgeModel) {
       return NextResponse.json({ error: 'Valores obrigatórios ausentes' }, { status: 400 });
     }
 
-    // Prepare history and system instructions
-    let messages = [];
+    const systemPrompt = "Você é um Juiz Especialista independente. Abaixo está o problema original e os argumentos de múltiplos modelos de IA que debateram a questão. Você NÃO participou do debate. Analise os argumentos, avalie qual lado possui a lógica mais fundamentada, corrija eventuais falácias e forneça a Resposta Final Definitiva. Estruture sua resposta com '## Avaliação do Debate' e '## Veredito Final'.";
 
-    // System Prompt from client (or default)
-    const systemPrompt = clientSystemPrompt || "Você é um especialista participando num Sistema de Deliberação Assistida por LLMs. Responda SEMPRE em Português do Brasil. IMPORTANTE: Estruture a sua resposta usando EXATAMENTE duas marcações Markdown: '## Análise' e '## Conclusão Final'. Seja claro, estruturado e profissional.";
-    
-    const modelInfo = ALL_MODELS.find(m => m.id === model);
-    let personaAddon = "";
-    if (modelInfo && modelInfo.strengths && modelInfo.strengths.length > 0) {
-      personaAddon = `\n\nAborde este problema focando nas suas principais forças analíticas: ${modelInfo.strengths.join(", ")}.`;
-    }
-    const finalSystemPrompt = systemPrompt + personaAddon;
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Problema original: ${prompt}\n\n[DEBATE]\n${transcript}` }
+    ];
 
-    messages.push({ role: 'system', content: finalSystemPrompt });
-
-    if (round === 1) {
-      messages.push({ role: 'user', content: prompt });
-    } else {
-      let myPreviousResponse = null;
-      let otherResponsesText = "";
-
-      if (Array.isArray(previousResponses)) {
-        myPreviousResponse = previousResponses.find((r: any) => r.modelId === model);
-        const otherResponses = previousResponses.filter((r: any) => r.modelId !== model);
-        otherResponsesText = otherResponses.map((r: any) => `[${r.modelName} - Rodada ${r.round}]:\n${r.text}`).join('\n\n');
-      }
-
-      const contextualPrompt = `Problema original: ${prompt}\n\nNa rodada anterior, esta foi a sua posição:\n${myPreviousResponse ? myPreviousResponse.text : 'Nenhuma'}\n\nEstas foram as perspectivas válidas apresentadas pelos seus colegas nas rodadas anteriores:\n${otherResponsesText || 'Nenhuma'}\n\nReflita honestamente sobre a sua posição face às dos seus colegas. Se percebe convergência, reconheça e complemente com detalhes práticos. Se percebe divergência, avalie se está errado, parcialmente errado ou se ainda faz sentido manter a sua posição. É perfeitamente aceitável mudar de ideia, fundir ideias ou discordar educadamente justificando o porquê. Evite repetir o que já foi dito — foque-se em agregar clareza ou aprofundar a análise.`;
-      
-      messages.push({ role: 'user', content: contextualPrompt });
-    }
-
-    // Dispatch to the correct provider
     let resultText = "";
+    const model = judgeModel;
 
     // 1. Google Gemini (Native API)
     if (model.includes("gemini")) {
       const apiKey = process.env.GEMINI_API_KEY;
       if (!apiKey) throw new Error("GEMINI_API_KEY não configurada");
       
-      // Map OpenAI format to Gemini format natively or use generic endpoint 
-      // For simplicity using raw REST Call to Gemini API format.
-      const geminiMessages = messages.map(m => ({
-        role: m.role === 'user' ? 'user' : 'model',
-        parts: [{text: m.content}]
-      }));
-      // Gemini 3.1 Pro Preview may use the same formatting as Gemini 1.5 Pro via REST Call
       const payload = {
-        systemInstruction: { parts: [{ text: finalSystemPrompt }] },
-        contents: [{ role: "user", parts: [{ text: messages.filter(m => m.role !== 'system').map(m => m.content).join('\n') }] }]
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: [{ role: "user", parts: [{ text: messages.find(m => m.role === 'user')?.content || "" }] }]
       };
 
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`, {
+      const modelId = model.startsWith("gemini/") ? model.replace("gemini/", "") : model;
+
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -104,7 +73,7 @@ export async function POST(req: NextRequest) {
         headers: {
           "Authorization": `Bearer ${apiKey}`,
           "Content-Type": "application/json",
-          "HTTP-Referer": "http://localhost:3000", // Required for OpenRouter
+          "HTTP-Referer": "http://localhost:3000",
           "X-Title": "LLM Delibertation System",
         },
         body: JSON.stringify({
@@ -153,7 +122,6 @@ export async function POST(req: NextRequest) {
 
       if (!res.ok) {
         let errText = await res.text();
-        console.error(`[perplexity] API error ${res.status}:`, errText.substring(0, 300));
         try {
           const errObj = JSON.parse(errText);
           if (res.status === 401) throw new Error("PERPLEXITY_API_KEY inválida.");
@@ -162,18 +130,18 @@ export async function POST(req: NextRequest) {
         } catch (e: any) {
           if (e.message.includes("PERPLEXITY") || e.message.includes("Limite")) throw e;
         }
-        throw new Error(`Perplexity Error (${res.status}): ${errText}`);
+        throw new Error(`Perplexity Error: ${errText}`);
       }
       const data = await res.json();
       resultText = data.choices?.[0]?.message?.content || "";
     }
     
-    // 4. OpenAI models (via OPENAI_API_KEY)
-    else if (model.startsWith("openai/")) {
+    // 4. OpenAI models
+    else if (model.startsWith("openai/") || model.startsWith("chatgpt/")) {
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) throw new Error("OPENAI_API_KEY não configurada. Adicione no .env.local");
 
-      const modelId = model.replace("openai/", "");
+      const modelId = model.replace("openai/", "").replace("chatgpt/", "");
 
       const res = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
@@ -190,7 +158,6 @@ export async function POST(req: NextRequest) {
 
       if (!res.ok) {
         let errText = await res.text();
-        console.error(`[openai] API error ${res.status}:`, errText.substring(0, 500));
         try {
           const errObj = JSON.parse(errText);
           if (res.status === 401) throw new Error("OPENAI_API_KEY inválida.");
@@ -201,13 +168,13 @@ export async function POST(req: NextRequest) {
         } catch (e: any) {
           if (e.message.includes("OPENAI") || e.message.includes("créditos")) throw e;
         }
-        throw new Error(`OpenAI Error (${res.status}): ${errText}`);
+        throw new Error(`OpenAI Error: ${errText}`);
       }
       const data = await res.json();
       resultText = data.choices?.[0]?.message?.content || "";
     }
 
-    // 4. Local Models (Local server compatible with OpenAI API)
+    // 5. Local Models
     else {
       const baseUrl = process.env.LOCAL_BASE_URL || "http://localhost:1234/v1";
       const modelId = model.replace("local/", "");
@@ -228,12 +195,12 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ text: resultText });
-    
-  } catch (error: any) {
-    console.error("Deliberation Error:", error);
-    if (error.name === 'AbortError' || error.message.includes('timeout')) {
-       return NextResponse.json({ error: "O modelo demorou muito a responder (Timeout de 60s excedido)." }, { status: 504 });
-    }
-    return NextResponse.json({ error: error.message || "Erro desconhecido" }, { status: 500 });
+
+  } catch (err: any) {
+    console.error("Judge Route Error:", err);
+    return NextResponse.json(
+      { error: err.message || "Erro interno no servidor" },
+      { status: 500 }
+    );
   }
 }

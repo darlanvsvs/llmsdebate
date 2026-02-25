@@ -7,8 +7,7 @@ import ReactMarkdown from "react-markdown";
 import { ALL_MODELS } from "@/lib/models";
 
 export function ActionControls() {
-  const { status, round, responses, selectedModels, startNextRound, endDeliberation, endWithFullTranscript, synthesisResult, fullTranscriptResult, clearSynthesis, clearFullTranscript, selectedResponseIds, toggleResponseSelection, selectAllResponses, clearResponseSelection } = useDeliberationStore();
-  const [synthesisLoading, setSynthesisLoading] = useState(false);
+  const { status, round, responses, selectedModels, startNextRound, endDeliberation, endWithFullTranscript, synthesisResult, fullTranscriptResult, clearSynthesis, clearFullTranscript, selectedResponseIds, toggleResponseSelection, selectAllResponses, clearResponseSelection, requestJudgeSynthesis, isJudging } = useDeliberationStore();
   const [synthesisModel, setSynthesisModel] = useState<string>("");
   const [copied, setCopied] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -25,7 +24,7 @@ export function ActionControls() {
   // Selection logic for synthesis
   const validResponses = responses.filter(r => !r.error);
   const hasSelectedAll = validResponses.length > 0 && selectedResponseIds.length === validResponses.length;
-  const synthesisDisabled = status === 'completed' || !canContinue || synthesisLoading || selectedResponseIds.length === 0;
+  const synthesisDisabled = status === 'completed' || !canContinue || isJudging || selectedResponseIds.length === 0;
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -100,56 +99,8 @@ export function ActionControls() {
     const targetModel = synthesisModel || activeModels[0] || responses[0]?.modelId;
     if (!targetModel) return;
 
-    setSynthesisLoading(true);
     setDropdownOpen(false);
-
-    try {
-      const allTextHistory = responses
-        .filter(r => !r.error && selectedResponseIds.includes(r.id))
-        .map(r => `[${r.modelName} - Rodada ${r.round}]:\nAnálise:\n${r.analysis}\n\nConclusão:\n${r.conclusion}`)
-        .join('\n\n---\n\n');
-
-      const prompt = `Com base nas discussões completas das rodadas anteriores, produza uma síntese estruturada contendo: Pontos de consenso, Pontos de divergência, Incertezas remanescentes, Recomendação prática final.\n\nHistórico:\n${allTextHistory}`;
-      
-      const isLocal = targetModel.startsWith('local/');
-      const endpoint = isLocal ? '/api/local' : '/api/deliberate';
-      
-      let body: any = {
-         prompt,
-         round: 1, // Treat synthesis as new 1-shot prompt for that endpoint logic
-         model: targetModel,
-      };
-
-      if (isLocal) {
-        body = {
-          model: targetModel.replace('local/', ''),
-          messages: [{ role: 'user', content: prompt }]
-        };
-      }
-
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        const msg = errData.error || `Erro na síntese (HTTP ${res.status})`;
-        alert(msg);
-        setSynthesisLoading(false);
-        return;
-      }
-      const data = await res.json();
-      
-      const synthText = isLocal ? data.choices?.[0]?.message?.content : data.text;
-      endDeliberation(synthText);
-
-    } catch (error: any) {
-      alert("Falha de rede ao gerar síntese. Verifique sua conexão.");
-    } finally {
-      setSynthesisLoading(false);
-    }
+    await requestJudgeSynthesis(targetModel);
   };
 
   const handleFullTranscript = () => {
@@ -264,8 +215,8 @@ export function ActionControls() {
                 disabled={synthesisDisabled}
                 className="flex items-center gap-2 bg-white hover:bg-zinc-200 text-zinc-950 px-5 py-3 rounded-l-xl transition-all font-semibold shadow-[0_0_20px_rgba(255,255,255,0.15)] disabled:opacity-50 disabled:cursor-not-allowed border border-white/10 border-r-0 active:scale-[0.98] relative disabled:shadow-none"
               >
-                {synthesisLoading ? <span className="animate-spin w-5 h-5 border-2 border-zinc-950/30 border-t-zinc-950 rounded-full"></span> : <Send className="w-5 h-5" />}
-                {synthesisLoading ? 'Resumindo...' : 'Encerrar e Sintetizar'}
+                {isJudging ? <span className="animate-spin w-5 h-5 border-2 border-zinc-950/30 border-t-zinc-950 rounded-full"></span> : <Send className="w-5 h-5" />}
+                {isJudging ? 'Resumindo...' : 'Encerrar e Sintetizar'}
               </button>
 
               {/* Dropdown toggle */}

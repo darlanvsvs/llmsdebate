@@ -18,6 +18,7 @@ export function InputArea() {
 
   const [localModels, setLocalModels] = useState<{id: string, name: string}[]>([]);
   const [providerStatus, setProviderStatus] = useState<Record<string, { available: boolean; reason?: string }>>({});
+  const [openRouterFreeModels, setOpenRouterFreeModels] = useState<string[] | null>(null);
   const [savedSystemPrompt, setSavedSystemPrompt] = useState(false);
   
   // Local draft of system prompt. Only persists when user clicks Save.
@@ -58,6 +59,18 @@ export function InputArea() {
       .catch(() => {});
   }, []);
 
+  // Fetch OpenRouter dynamic pricing for free models
+  useEffect(() => {
+    fetch('/api/models/pricing')
+      .then(res => res.json())
+      .then(data => {
+        if (data && Array.isArray(data.freeModels)) {
+          setOpenRouterFreeModels(data.freeModels);
+        }
+      })
+      .catch(() => console.error("Could not fetch OpenRouter pricing"));
+  }, []);
+
   const isModelDisabled = (modelId: string): boolean => {
     const provider = getModelProvider(modelId);
     const st = providerStatus[provider];
@@ -70,11 +83,27 @@ export function InputArea() {
   };
 
   const allModels = useMemo(() => {
+    const updatedModels = ALL_MODELS.map(m => {
+      // If it's an OpenRouter model we initially deemed 'free', but it's absent from real-time free list:
+      if (m.provider === 'openrouter' && m.free === true && openRouterFreeModels !== null) {
+        const rawId = m.id.replace('openrouter/', '');
+        if (!openRouterFreeModels.includes(rawId)) {
+          return {
+            ...m,
+            free: false,
+            costTier: 'caro' as const, // Override to paid
+            description: "⚠️ [A OpenRouter encerrou o período gratuito] " + m.description
+          };
+        }
+      }
+      return m;
+    });
+
     return [
-      ...ALL_MODELS, 
+      ...updatedModels, 
       ...localModels.map(m => ({ ...m, provider: 'local', free: true, description: '', strengths: [] as string[], costTier: 'grátis' as const, bestFor: '' }))
     ];
-  }, [localModels]);
+  }, [localModels, openRouterFreeModels]);
 
   useEffect(() => {
     // Clean up any stale model IDs that were saved in the user's localStorage
